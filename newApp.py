@@ -11,6 +11,8 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
 
 st.set_page_config(
     page_title="AI Complaint Intelligence Platform",
@@ -18,74 +20,64 @@ st.set_page_config(
 )
 
 # -----------------------------
-# Custom Styling
+# Styling
 # -----------------------------
-st.markdown(
-    """
-    <style>
-    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap');
+st.markdown("""
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap');
 
-    html, body, [class*="css"] {
-        font-family: 'Inter', sans-serif;
-    }
+html, body, [class*="css"] {
+    font-family: 'Inter', sans-serif;
+}
 
-    .main-title {
-        font-size: 42px;
-        font-weight: 800;
-        color: #111827;
-        margin-bottom: 5px;
-    }
+.main-title {
+    font-size: 42px;
+    font-weight: 800;
+    color: #111827;
+    margin-bottom: 5px;
+}
 
-    .subtitle {
-        font-size: 15px;
-        color: #6B7280;
-        margin-bottom: 30px;
-    }
+.subtitle {
+    font-size: 15px;
+    color: #6B7280;
+    margin-bottom: 30px;
+}
 
-    .kpi-card {
-        background-color: #F8FAFC;
-        border: 1px solid #E5E7EB;
-        border-radius: 16px;
-        padding: 20px;
-        min-height: 140px;
-        box-shadow: 0 2px 8px rgba(0,0,0,0.04);
-    }
+.kpi-card {
+    background-color: #F8FAFC;
+    border: 1px solid #E5E7EB;
+    border-radius: 16px;
+    padding: 20px;
+    min-height: 140px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.04);
+}
 
-    .kpi-label {
-        font-size: 13px;
-        color: #6B7280;
-        font-weight: 700;
-        text-transform: uppercase;
-        letter-spacing: 0.03em;
-        margin-bottom: 12px;
-    }
+.kpi-label {
+    font-size: 13px;
+    color: #6B7280;
+    font-weight: 700;
+    text-transform: uppercase;
+    margin-bottom: 12px;
+}
 
-    .kpi-value {
-        font-size: 26px;
-        color: #111827;
-        font-weight: 800;
-        line-height: 1.25;
-        white-space: normal;
-        overflow-wrap: break-word;
-        word-break: normal;
-    }
+.kpi-value {
+    font-size: 25px;
+    color: #111827;
+    font-weight: 800;
+    line-height: 1.25;
+    white-space: normal;
+    overflow-wrap: break-word;
+}
 
-    .section-header {
-        font-size: 26px;
-        font-weight: 800;
-        color: #111827;
-        margin-top: 15px;
-        margin-bottom: 15px;
-    }
-
-    .small-note {
-        font-size: 14px;
-        color: #6B7280;
-    }
-    </style>
-    """,
-    unsafe_allow_html=True
-)
+.section-header {
+    font-size: 26px;
+    font-weight: 800;
+    color: #111827;
+    margin-top: 15px;
+    margin-bottom: 15px;
+}
+</style>
+""", unsafe_allow_html=True)
 
 # -----------------------------
 # Load Data
@@ -95,9 +87,6 @@ def load_data():
     df = pd.read_csv("processed_complaints.csv")
     df.columns = df.columns.str.strip().str.lower()
 
-    df["risk_score"] = pd.to_numeric(df["risk_score"], errors="coerce")
-    df["consumer_complaint_narrative"] = df["consumer_complaint_narrative"].astype(str)
-
     required_cols = [
         "theme",
         "risk_score",
@@ -105,15 +94,55 @@ def load_data():
         "consumer_complaint_narrative"
     ]
 
-    df = df.dropna(subset=required_cols)
+    missing = [col for col in required_cols if col not in df.columns]
+    if missing:
+        st.error(f"Missing required columns in CSV: {missing}")
+        st.stop()
+
+    df["risk_score"] = pd.to_numeric(df["risk_score"], errors="coerce")
+    df["consumer_complaint_narrative"] = df["consumer_complaint_narrative"].astype(str)
+    df["theme"] = df["theme"].astype(str)
+    df["recommendation"] = df["recommendation"].astype(str)
+
+    df = df.dropna(subset=required_cols).reset_index(drop=True)
 
     if "company" in df.columns:
         df["company"] = df["company"].astype(str)
+
+    # Keeps app fast locally and on Streamlit Cloud
+    df = df.sample(
+        n=min(3000, len(df)),
+        random_state=42
+    ).reset_index(drop=True)
 
     return df
 
 
 pdf = load_data()
+
+# -----------------------------
+# TF-IDF Semantic Search
+# -----------------------------
+@st.cache_resource
+def build_search_index(texts):
+    cleaned_texts = [
+        str(text)[:1000] for text in texts
+    ]
+
+    vectorizer = TfidfVectorizer(
+        stop_words="english",
+        max_features=8000,
+        ngram_range=(1, 2)
+    )
+
+    matrix = vectorizer.fit_transform(cleaned_texts)
+
+    return vectorizer, matrix
+
+
+vectorizer, complaint_matrix = build_search_index(
+    pdf["consumer_complaint_narrative"].tolist()
+)
 
 # -----------------------------
 # Helper Functions
@@ -131,17 +160,25 @@ def kpi_card(title, value):
 
 
 def retrieve_relevant_complaints(query, data, k=10):
-    query_words = query.lower().split()
+    if len(data) == 0:
+        return data.copy()
+
+    query_vector = vectorizer.transform([query])
+
+    data_indices = data.index.tolist()
+    filtered_matrix = complaint_matrix[data_indices]
+
+    scores = cosine_similarity(
+        query_vector,
+        filtered_matrix
+    )[0]
 
     temp = data.copy()
-
-    temp["match_score"] = temp["consumer_complaint_narrative"].astype(str).apply(
-        lambda x: sum(word in x.lower() for word in query_words)
-    )
+    temp["semantic_score"] = scores
 
     results = (
         temp.sort_values(
-            ["match_score", "risk_score"],
+            ["semantic_score", "risk_score"],
             ascending=False
         )
         .head(k)
@@ -166,9 +203,10 @@ def answer_business_question(query, data, k=10):
     top_themes = theme_counts.head(3).index.tolist()
 
     summary = (
-        f"Based on the retrieved complaints, the most relevant customer pain points are "
-        f"{', '.join(top_themes)}. The average retrieved risk score is {avg_risk:.2f}, "
-        f"indicating a {risk_level.lower()} level of business risk."
+        f"Based on semantic retrieval from the complaint database, the most relevant "
+        f"customer pain points are {', '.join(top_themes)}. "
+        f"The average retrieved risk score is {avg_risk:.2f}, indicating a "
+        f"{risk_level.lower()} level of business risk."
     )
 
     return results, summary, theme_counts, avg_risk, risk_level, recommendations
@@ -188,21 +226,16 @@ st.markdown(
 )
 
 # -----------------------------
-# Sidebar Filters
+# Sidebar
 # -----------------------------
 st.sidebar.header("Filters")
 
 if "company" in pdf.columns:
-    company_options = ["All"] + sorted(
-        pdf["company"].dropna().astype(str).unique().tolist()
-    )
+    company_options = ["All"] + sorted(pdf["company"].dropna().unique().tolist())
 else:
     company_options = ["All"]
 
-company_filter = st.sidebar.selectbox(
-    "Company",
-    company_options
-)
+company_filter = st.sidebar.selectbox("Company", company_options)
 
 theme_filter = st.sidebar.selectbox(
     "Theme",
@@ -218,15 +251,10 @@ if theme_filter != "All":
     filtered = filtered[filtered["theme"] == theme_filter]
 
 # -----------------------------
-# KPI Cards
+# KPIs
 # -----------------------------
 if len(filtered) > 0:
-    highest_risk_theme = (
-        filtered.groupby("theme")["risk_score"]
-        .mean()
-        .idxmax()
-    )
-
+    highest_risk_theme = filtered.groupby("theme")["risk_score"].mean().idxmax()
     avg_risk_score = round(filtered["risk_score"].mean(), 2)
     themes_discovered = filtered["theme"].nunique()
 else:
@@ -253,39 +281,26 @@ st.divider()
 # -----------------------------
 # Tabs
 # -----------------------------
-tab1, tab2, tab3, tab4 = st.tabs(
-    [
-        "Executive Dashboard",
-        "Theme Analysis",
-        "AI Agent",
-        "High-Risk Complaints"
-    ]
-)
+tab1, tab2, tab3, tab4 = st.tabs([
+    "Executive Dashboard",
+    "Theme Analysis",
+    "AI Agent",
+    "High-Risk Complaints"
+])
 
 # -----------------------------
-# Tab 1: Executive Dashboard
+# Tab 1
 # -----------------------------
 with tab1:
-    st.markdown(
-        '<div class="section-header">Executive Overview</div>',
-        unsafe_allow_html=True
-    )
+    st.markdown('<div class="section-header">Executive Overview</div>', unsafe_allow_html=True)
 
     if len(filtered) == 0:
         st.warning("No data available for the selected filters.")
     else:
         left, right = st.columns(2)
 
-        theme_volume = (
-            filtered["theme"]
-            .value_counts()
-            .reset_index()
-        )
-
-        theme_volume.columns = [
-            "Theme",
-            "Complaint Count"
-        ]
+        theme_volume = filtered["theme"].value_counts().reset_index()
+        theme_volume.columns = ["Theme", "Complaint Count"]
 
         fig1 = px.bar(
             theme_volume,
@@ -294,18 +309,11 @@ with tab1:
             orientation="h",
             title="Complaint Volume by Theme"
         )
-
         fig1.update_layout(
             yaxis={"categoryorder": "total ascending"},
-            height=560,
-            font=dict(size=12),
-            title_font=dict(size=18)
+            height=560
         )
-
-        left.plotly_chart(
-            fig1,
-            use_container_width=True
-        )
+        left.plotly_chart(fig1, use_container_width=True)
 
         theme_risk = (
             filtered.groupby("theme")
@@ -321,18 +329,11 @@ with tab1:
             orientation="h",
             title="Average Risk Score by Theme"
         )
-
         fig2.update_layout(
             yaxis={"categoryorder": "total ascending"},
-            height=560,
-            font=dict(size=12),
-            title_font=dict(size=18)
+            height=560
         )
-
-        right.plotly_chart(
-            fig2,
-            use_container_width=True
-        )
+        right.plotly_chart(fig2, use_container_width=True)
 
         st.subheader("Recommendation Summary")
 
@@ -343,19 +344,13 @@ with tab1:
             .sort_values("complaint_count", ascending=False)
         )
 
-        st.dataframe(
-            rec_summary,
-            use_container_width=True
-        )
+        st.dataframe(rec_summary, use_container_width=True)
 
 # -----------------------------
-# Tab 2: Theme Analysis
+# Tab 2
 # -----------------------------
 with tab2:
-    st.markdown(
-        '<div class="section-header">Explore Complaint Themes</div>',
-        unsafe_allow_html=True
-    )
+    st.markdown('<div class="section-header">Explore Complaint Themes</div>', unsafe_allow_html=True)
 
     if len(filtered) == 0:
         st.warning("No data available for the selected filters.")
@@ -365,9 +360,7 @@ with tab2:
             sorted(filtered["theme"].dropna().unique())
         )
 
-        theme_df = filtered[
-            filtered["theme"] == selected_theme
-        ]
+        theme_df = filtered[filtered["theme"] == selected_theme]
 
         c1, c2, c3 = st.columns(3)
 
@@ -381,32 +374,19 @@ with tab2:
             kpi_card("Max Risk", round(theme_df["risk_score"].max(), 2))
 
         st.markdown("### Recommended Action")
-
-        if len(theme_df) > 0:
-            st.info(
-                theme_df["recommendation"]
-                .mode()
-                .iloc[0]
-            )
+        st.info(theme_df["recommendation"].mode().iloc[0])
 
         st.markdown("### Sample Complaints")
 
         for _, row in theme_df.head(5).iterrows():
-            with st.expander(
-                f"Risk Score: {round(row['risk_score'], 2)}"
-            ):
-                st.write(
-                    row["consumer_complaint_narrative"][:1200]
-                )
+            with st.expander(f"Risk Score: {round(row['risk_score'], 2)}"):
+                st.write(row["consumer_complaint_narrative"][:1200])
 
 # -----------------------------
-# Tab 3: AI Agent
+# Tab 3
 # -----------------------------
 with tab3:
-    st.markdown(
-        '<div class="section-header">AI Complaint Intelligence Agent</div>',
-        unsafe_allow_html=True
-    )
+    st.markdown('<div class="section-header">AI Complaint Intelligence Agent</div>', unsafe_allow_html=True)
 
     st.markdown(
         """
@@ -417,7 +397,7 @@ with tab3:
 
     question = st.text_area(
         "Ask a business question",
-        value="What are the top fraud-related issues and what should leadership do?",
+        value="What fraud patterns are emerging?",
         height=120
     )
 
@@ -428,20 +408,11 @@ with tab3:
         value=10
     )
 
-    if st.button(
-        "Generate Executive Summary"
-    ):
+    if st.button("Generate Executive Summary"):
         if len(filtered) == 0:
             st.warning("No data available for the selected filters.")
         else:
-            (
-                results,
-                summary,
-                theme_counts,
-                avg_risk,
-                risk_level,
-                recommendations
-            ) = answer_business_question(
+            results, summary, theme_counts, avg_risk, risk_level, recommendations = answer_business_question(
                 question,
                 filtered,
                 k
@@ -453,59 +424,38 @@ with tab3:
             c1, c2 = st.columns(2)
 
             with c1:
-                kpi_card(
-                    "Average Retrieved Risk Score",
-                    round(avg_risk, 2)
-                )
+                kpi_card("Average Retrieved Risk Score", round(avg_risk, 2))
 
             with c2:
-                kpi_card(
-                    "Risk Level",
-                    risk_level
-                )
+                kpi_card("Risk Level", risk_level)
 
             st.subheader("Key Complaint Drivers")
 
-            driver_df = (
-                theme_counts
-                .reset_index()
-            )
+            driver_df = theme_counts.reset_index()
+            driver_df.columns = ["Theme", "Retrieved Complaints"]
 
-            driver_df.columns = [
-                "Theme",
-                "Retrieved Complaints"
-            ]
-
-            st.dataframe(
-                driver_df,
-                use_container_width=True
-            )
+            st.dataframe(driver_df, use_container_width=True)
 
             st.subheader("Recommended Business Actions")
 
             for rec in recommendations[:5]:
-                st.markdown(
-                    f"- {rec}"
-                )
+                st.markdown(f"- {rec}")
 
             st.subheader("Supporting Complaint Evidence")
 
             for _, row in results.head(5).iterrows():
+                score = row.get("semantic_score", 0)
+
                 with st.expander(
-                    f"{row['theme']} | Risk Score: {round(row['risk_score'], 2)}"
+                    f"{row['theme']} | Risk Score: {round(row['risk_score'], 2)} | Match: {round(score, 3)}"
                 ):
-                    st.write(
-                        row["consumer_complaint_narrative"][:1500]
-                    )
+                    st.write(row["consumer_complaint_narrative"][:1500])
 
 # -----------------------------
-# Tab 4: High Risk Complaints
+# Tab 4
 # -----------------------------
 with tab4:
-    st.markdown(
-        '<div class="section-header">High-Risk Complaint Queue</div>',
-        unsafe_allow_html=True
-    )
+    st.markdown('<div class="section-header">High-Risk Complaint Queue</div>', unsafe_allow_html=True)
 
     if len(filtered) == 0:
         st.warning("No data available for the selected filters.")
@@ -518,18 +468,11 @@ with tab4:
         )
 
         high_risk = (
-            filtered[
-                filtered["risk_score"] >= risk_threshold
-            ]
-            .sort_values(
-                "risk_score",
-                ascending=False
-            )
+            filtered[filtered["risk_score"] >= risk_threshold]
+            .sort_values("risk_score", ascending=False)
         )
 
-        st.write(
-            f"{len(high_risk):,} complaints above selected risk threshold."
-        )
+        st.write(f"{len(high_risk):,} complaints above selected risk threshold.")
 
         cols_to_show = [
             "theme",
@@ -539,9 +482,7 @@ with tab4:
         ]
 
         if "company" in filtered.columns:
-            cols_to_show = [
-                "company"
-            ] + cols_to_show
+            cols_to_show = ["company"] + cols_to_show
 
         st.dataframe(
             high_risk[cols_to_show],
