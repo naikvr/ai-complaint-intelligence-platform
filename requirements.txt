@@ -4,3 +4,4 @@ plotly
 sentence-transformers
 scikit-learn
 openai 
+faiss-cpu
